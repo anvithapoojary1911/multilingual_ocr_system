@@ -17,7 +17,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 import re
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 UPLOAD_FOLDER = 'uploads'
 OUTPUT_FOLDER = 'outputs'
@@ -353,4 +353,5 @@ def preview_preprocessing():
 
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
