@@ -4,7 +4,7 @@ import axios from 'axios';
 import toast, { Toaster } from 'react-hot-toast';
 import './App.css';
 
-const API = 'http://localhost:5000/api';
+const API = 'laudable-friendship-production-00e5.up.railway.app';
 
 const LANGUAGES = [
   { value: 'english', label: '🇬🇧 English', code: 'eng' },
