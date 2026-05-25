@@ -1,7 +1,9 @@
 services:
   - type: web
     name: multilingual-ocr-system
-    env: python
-    rootDir: backend
-    buildCommand: pip install -r requirements.txt
-    startCommand: python app.py
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: 10000
