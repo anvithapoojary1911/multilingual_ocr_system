@@ -1,20 +1,23 @@
+# Python 3.14 compatibility patch — must be before pytesseract import
+import pkgutil
+if not hasattr(pkgutil, 'find_loader'):
+    pkgutil.find_loader = lambda name: None
+
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import pytesseract
-from PIL import Image, ImageFilter, ImageEnhance
+from PIL import Image
 import cv2
 import numpy as np
 import io
 import os
 import base64
-import json
 import time
 import zipfile
 import tempfile
 from datetime import datetime
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
-import re
 
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
@@ -41,6 +44,7 @@ LANGUAGE_MAP = {
     'all': 'eng+hin+kan+tam+tel',
 }
 
+
 def preprocess_image(image_bytes, preprocessing_level='standard'):
     """Preprocess image for better OCR accuracy."""
     nparr = np.frombuffer(image_bytes, np.uint8)
@@ -55,9 +59,7 @@ def preprocess_image(image_bytes, preprocessing_level='standard'):
         processed = gray
 
     elif preprocessing_level == 'standard':
-        # Denoise
         denoised = cv2.fastNlMeansDenoising(gray, h=10)
-        # Adaptive threshold
         processed = cv2.adaptiveThreshold(
             denoised, 255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -65,24 +67,19 @@ def preprocess_image(image_bytes, preprocessing_level='standard'):
         )
 
     elif preprocessing_level == 'aggressive':
-        # Denoise
         denoised = cv2.fastNlMeansDenoising(gray, h=15)
-        # Sharpen
-        kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
+        kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
         sharpened = cv2.filter2D(denoised, -1, kernel)
-        # Adaptive threshold
         thresholded = cv2.adaptiveThreshold(
             sharpened, 255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
             cv2.THRESH_BINARY, 11, 2
         )
-        # Morphological operations
         kernel_morph = np.ones((1, 1), np.uint8)
         processed = cv2.morphologyEx(thresholded, cv2.MORPH_CLOSE, kernel_morph)
 
     elif preprocessing_level == 'deskew':
         denoised = cv2.fastNlMeansDenoising(gray, h=10)
-        # Deskew
         coords = np.column_stack(np.where(denoised > 0))
         if len(coords) > 0:
             angle = cv2.minAreaRect(coords)[-1]
@@ -93,8 +90,17 @@ def preprocess_image(image_bytes, preprocessing_level='standard'):
             (h, w) = denoised.shape[:2]
             center = (w // 2, h // 2)
             M = cv2.getRotationMatrix2D(center, angle, 1.0)
-            denoised = cv2.warpAffine(denoised, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
-        processed = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+            denoised = cv2.warpAffine(
+                denoised, M, (w, h),
+                flags=cv2.INTER_CUBIC,
+                borderMode=cv2.BORDER_REPLICATE
+            )
+        processed = cv2.adaptiveThreshold(
+            denoised, 255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, 11, 2
+        )
+
     else:
         processed = gray
 
@@ -114,13 +120,21 @@ def get_ocr_confidence(image_bytes, lang_code):
     """Get word-level confidence data."""
     try:
         pil_image = Image.open(io.BytesIO(image_bytes))
-        data = pytesseract.image_to_data(pil_image, lang=lang_code, output_type=pytesseract.Output.DICT)
+        data = pytesseract.image_to_data(
+            pil_image, lang=lang_code,
+            output_type=pytesseract.Output.DICT
+        )
         confidences = [c for c in data['conf'] if c != -1]
         avg_confidence = sum(confidences) / len(confidences) if confidences else 0
         return round(avg_confidence, 2)
-    except:
+    except Exception as e:
+        print(f"[WARN] Confidence scoring failed: {e}")
         return 0
 
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 
 @app.route('/api/health', methods=['GET'])
 def health():
@@ -139,7 +153,11 @@ def get_languages():
         available = pytesseract.get_languages()
         return jsonify({'languages': list(LANGUAGE_MAP.keys()), 'installed': available})
     except Exception as e:
-        return jsonify({'languages': list(LANGUAGE_MAP.keys()), 'installed': [], 'error': str(e)})
+        return jsonify({
+            'languages': list(LANGUAGE_MAP.keys()),
+            'installed': [],
+            'error': str(e)
+        })
 
 
 @app.route('/api/ocr', methods=['POST'])
@@ -147,37 +165,25 @@ def process_single_image():
     """Process a single image for OCR."""
     start_time = time.time()
 
-    if 'image' not in request.files and 'image_base64' not in request.json if request.is_json else True:
-        if 'image' not in request.files:
-            return jsonify({'error': 'No image provided'}), 400
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
 
     language = request.form.get('language', 'english')
     preprocessing = request.form.get('preprocessing', 'standard')
     psm = int(request.form.get('psm', 3))
-
     lang_code = LANGUAGE_MAP.get(language, 'eng')
 
-    if 'image' in request.files:
-        file = request.files['image']
-        image_bytes = file.read()
-        filename = file.filename
-    else:
-        return jsonify({'error': 'No image file provided'}), 400
+    file = request.files['image']
+    image_bytes = file.read()
+    filename = file.filename
 
     try:
-        # Preprocess
         processed_bytes = preprocess_image(image_bytes, preprocessing)
-
-        # Run OCR
         text = run_ocr(processed_bytes, lang_code, psm)
-
-        # Get confidence
         confidence = get_ocr_confidence(processed_bytes, lang_code)
 
-        # Word count
         words = [w for w in text.split() if w.strip()]
         lines = [l for l in text.split('\n') if l.strip()]
-
         elapsed = round(time.time() - start_time, 2)
 
         return jsonify({
@@ -209,8 +215,8 @@ def process_bulk_images():
     language = request.form.get('language', 'english')
     preprocessing = request.form.get('preprocessing', 'standard')
     export_format = request.form.get('export_format', 'json')
-
     lang_code = LANGUAGE_MAP.get(language, 'eng')
+
     results = []
 
     for file in files:
@@ -242,10 +248,14 @@ def process_bulk_images():
 
     total_time = round(time.time() - start_time, 2)
     success_count = sum(1 for r in results if r['status'] == 'success')
-    avg_confidence = sum(r.get('confidence', 0) for r in results if r['status'] == 'success')
-    avg_confidence = round(avg_confidence / success_count, 2) if success_count > 0 else 0
+    avg_confidence = (
+        round(
+            sum(r.get('confidence', 0) for r in results if r['status'] == 'success')
+            / success_count, 2
+        )
+        if success_count > 0 else 0
+    )
 
-    # Export
     export_path = None
     if export_format == 'excel':
         export_path = export_to_excel(results)
@@ -268,6 +278,10 @@ def process_bulk_images():
     return jsonify(response_data)
 
 
+# ---------------------------------------------------------------------------
+# Export helpers
+# ---------------------------------------------------------------------------
+
 def export_to_excel(results):
     """Export results to Excel."""
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -289,7 +303,7 @@ def export_to_excel(results):
         cell.alignment = Alignment(horizontal='center')
 
     for i, result in enumerate(results, 2):
-        ws.cell(row=i, column=1, value=i-1)
+        ws.cell(row=i, column=1, value=i - 1)
         ws.cell(row=i, column=2, value=result.get('filename', ''))
         ws.cell(row=i, column=3, value=result.get('text', ''))
         ws.cell(row=i, column=4, value=result.get('confidence', 0))
@@ -298,14 +312,14 @@ def export_to_excel(results):
         ws.cell(row=i, column=7, value=result.get('processing_time', 0))
         ws.cell(row=i, column=8, value=result.get('status', ''))
 
-    ws.column_dimensions['C'].width = 50
     ws.column_dimensions['B'].width = 30
+    ws.column_dimensions['C'].width = 50
     wb.save(filepath)
     return filepath
 
 
 def export_to_txt(results):
-    """Export results to text file."""
+    """Export results to plain text file."""
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     filename = f'ocr_results_{timestamp}.txt'
     filepath = os.path.join(OUTPUT_FOLDER, filename)
@@ -322,6 +336,10 @@ def export_to_txt(results):
             f.write("-" * 40 + "\n\n")
     return filepath
 
+
+# ---------------------------------------------------------------------------
+# Utility routes
+# ---------------------------------------------------------------------------
 
 @app.route('/api/download/<filename>', methods=['GET'])
 def download_file(filename):
@@ -344,13 +362,13 @@ def preview_preprocessing():
     try:
         image_bytes = file.read()
         processed_bytes = preprocess_image(image_bytes, preprocessing)
-
-        # Convert to base64
         b64 = base64.b64encode(processed_bytes).decode('utf-8')
         return jsonify({'success': True, 'image': f'data:image/png;base64,{b64}'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
+# ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
