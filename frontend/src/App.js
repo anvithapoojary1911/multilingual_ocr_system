@@ -1,299 +1,525 @@
-# Python 3.14 compatibility patch — must be before pytesseract import
-import pkgutil
-if not hasattr(pkgutil, 'find_loader'):
-    pkgutil.find_loader = lambda name: None
+import React, { useState, useCallback, useRef } from 'react';
+import { useDropzone } from 'react-dropzone';
+import axios from 'axios';
+import toast, { Toaster } from 'react-hot-toast';
+import './App.css';
 
-from flask import Flask, request, jsonify, send_file
-from flask_cors import CORS
-import pytesseract
-from PIL import Image
-import cv2
-import numpy as np
-import io
-import os
-import base64
-import time
-from datetime import datetime
-import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment
+const API = process.env.REACT_APP_API || 'https://laudable-friendship-production-2c67.up.railway.app';
 
-app = Flask(__name__)
+const LANGUAGES = [
+  { value: 'english', label: '🇬🇧 English', code: 'eng' },
+  { value: 'hindi', label: '🇮🇳 Hindi', code: 'hin' },
+  { value: 'kannada', label: '🏛️ Kannada', code: 'kan' },
+  { value: 'tamil', label: '🌴 Tamil', code: 'tam' },
+  { value: 'telugu', label: '⭐ Telugu', code: 'tel' },
+  { value: 'marathi', label: '🌺 Marathi', code: 'mar' },
+  { value: 'bengali', label: '🐟 Bengali', code: 'ben' },
+  { value: 'gujarati', label: '🦁 Gujarati', code: 'guj' },
+  { value: 'punjabi', label: '🌾 Punjabi', code: 'pan' },
+  { value: 'malayalam', label: '🌊 Malayalam', code: 'mal' },
+  { value: 'english+hindi', label: '🔀 English + Hindi', code: 'eng+hin' },
+  { value: 'english+kannada', label: '🔀 English + Kannada', code: 'eng+kan' },
+  { value: 'english+hindi+kannada', label: '🔀 Eng + Hindi + Kannada', code: 'eng+hin+kan' },
+  { value: 'all', label: '🌍 All Languages', code: 'all' },
+];
 
-# Allow all origins
-CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
+const PREPROCESSING = [
+  { value: 'minimal', label: 'Minimal', desc: 'Basic grayscale only' },
+  { value: 'standard', label: 'Standard', desc: 'Denoise + threshold' },
+  { value: 'aggressive', label: 'Aggressive', desc: 'Sharpen + morph ops' },
+  { value: 'deskew', label: 'Deskew', desc: 'Auto-rotate + clean' },
+];
 
-@app.after_request
-def add_cors_headers(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-    return response
+const PSM_MODES = [
+  { value: 3, label: 'Auto (Full Page)' },
+  { value: 6, label: 'Uniform Block' },
+  { value: 7, label: 'Single Line' },
+  { value: 8, label: 'Single Word' },
+  { value: 11, label: 'Sparse Text' },
+  { value: 13, label: 'Raw Line' },
+];
 
-@app.route('/', methods=['GET'])
-def index():
-    return jsonify({'status': 'ok', 'message': 'Multilingual OCR API'})
+function FileDropzone({ onFiles, multiple = false, label }) {
+  const onDrop = useCallback(accepted => onFiles(accepted), [onFiles]);
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
+    accept: { 'image/*': ['.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.webp'] },
+    multiple,
+  });
 
-UPLOAD_FOLDER = 'uploads'
-OUTPUT_FOLDER = 'outputs'
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-
-LANGUAGE_MAP = {
-    'english': 'eng',
-    'hindi': 'hin',
-    'kannada': 'kan',
-    'tamil': 'tam',
-    'telugu': 'tel',
-    'marathi': 'mar',
-    'bengali': 'ben',
-    'gujarati': 'guj',
-    'punjabi': 'pan',
-    'malayalam': 'mal',
-    'english+hindi': 'eng+hin',
-    'english+kannada': 'eng+kan',
-    'english+hindi+kannada': 'eng+hin+kan',
-    'all': 'eng+hin+kan+tam+tel',
+  return (
+    <div {...getRootProps()} className={`dropzone ${isDragActive ? 'active' : ''}`}>
+      <input {...getInputProps()} />
+      <div className="dropzone-content">
+        <div className="drop-icon">📁</div>
+        <p className="drop-label">{label}</p>
+        <p className="drop-sub">PNG, JPG, JPEG, TIFF, BMP, WEBP</p>
+        {isDragActive && <div className="drop-pulse">Drop it! 🎯</div>}
+      </div>
+    </div>
+  );
 }
 
+function StatCard({ icon, value, label, color }) {
+  return (
+    <div className="stat-card" style={{ '--accent': color }}>
+      <div className="stat-icon">{icon}</div>
+      <div className="stat-value">{value}</div>
+      <div className="stat-label">{label}</div>
+    </div>
+  );
+}
 
-def preprocess_image(image_bytes, preprocessing_level='standard'):
-    nparr = np.frombuffer(image_bytes, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    if img is None:
-        raise ValueError("Could not decode image")
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+function ConfidenceMeter({ value }) {
+  const color = value >= 80 ? '#00f5a0' : value >= 60 ? '#f5a623' : '#f54242';
+  return (
+    <div className="confidence-meter">
+      <div className="conf-header">
+        <span>OCR Confidence</span>
+        <span style={{ color }} className="conf-val">{value}%</span>
+      </div>
+      <div className="conf-bar-bg">
+        <div className="conf-bar-fill" style={{ width: `${value}%`, background: color }} />
+      </div>
+    </div>
+  );
+}
 
-    if preprocessing_level == 'minimal':
-        processed = gray
-    elif preprocessing_level == 'standard':
-        denoised = cv2.fastNlMeansDenoising(gray, h=10)
-        processed = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-    elif preprocessing_level == 'aggressive':
-        denoised = cv2.fastNlMeansDenoising(gray, h=15)
-        kernel = np.array([[-1,-1,-1],[-1,9,-1],[-1,-1,-1]])
-        sharpened = cv2.filter2D(denoised, -1, kernel)
-        thresholded = cv2.adaptiveThreshold(sharpened, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-        kernel_morph = np.ones((1,1), np.uint8)
-        processed = cv2.morphologyEx(thresholded, cv2.MORPH_CLOSE, kernel_morph)
-    elif preprocessing_level == 'deskew':
-        denoised = cv2.fastNlMeansDenoising(gray, h=10)
-        coords = np.column_stack(np.where(denoised > 0))
-        if len(coords) > 0:
-            angle = cv2.minAreaRect(coords)[-1]
-            angle = -(90 + angle) if angle < -45 else -angle
-            (h, w) = denoised.shape[:2]
-            M = cv2.getRotationMatrix2D((w//2, h//2), angle, 1.0)
-            denoised = cv2.warpAffine(denoised, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
-        processed = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-    else:
-        processed = gray
+// ─── SINGLE IMAGE TAB ─────────────────────────────────────────
+function SingleImageTab() {
+  const [file, setFile] = useState(null);
+  const [preview, setPreview] = useState(null);
+  const [language, setLanguage] = useState('english');
+  const [preprocessing, setPreprocessing] = useState('standard');
+  const [psm, setPsm] = useState(3);
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [copied, setCopied] = useState(false);
 
-    _, buffer = cv2.imencode('.png', processed)
-    return buffer.tobytes()
+  const handleFiles = (files) => {
+    const f = files[0];
+    setFile(f);
+    setPreview(URL.createObjectURL(f));
+    setResult(null);
+  };
 
-
-def run_ocr(image_bytes, lang_code, psm=3, oem=3):
-    pil_image = Image.open(io.BytesIO(image_bytes))
-    config = f'--psm {psm} --oem {oem}'
-    text = pytesseract.image_to_string(pil_image, lang=lang_code, config=config)
-    return text.strip()
-
-
-def get_ocr_confidence(image_bytes, lang_code):
-    try:
-        pil_image = Image.open(io.BytesIO(image_bytes))
-        data = pytesseract.image_to_data(pil_image, lang=lang_code, output_type=pytesseract.Output.DICT)
-        confidences = [c for c in data['conf'] if c != -1]
-        return round(sum(confidences) / len(confidences), 2) if confidences else 0
-    except Exception as e:
-        print(f"[WARN] Confidence scoring failed: {e}")
-        return 0
-
-
-@app.route('/api/health', methods=['GET'])
-def health():
-    try:
-        version = pytesseract.get_tesseract_version()
-        return jsonify({'status': 'ok', 'tesseract_version': str(version)})
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-
-@app.route('/api/languages', methods=['GET'])
-def get_languages():
-    try:
-        available = pytesseract.get_languages()
-        return jsonify({'languages': list(LANGUAGE_MAP.keys()), 'installed': available})
-    except Exception as e:
-        return jsonify({'languages': list(LANGUAGE_MAP.keys()), 'installed': [], 'error': str(e)})
-
-
-@app.route('/api/ocr', methods=['POST', 'OPTIONS'])
-def process_single_image():
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
-
-    start_time = time.time()
-    if 'image' not in request.files:
-        return jsonify({'error': 'No image file provided'}), 400
-
-    language = request.form.get('language', 'english')
-    preprocessing = request.form.get('preprocessing', 'standard')
-    psm = int(request.form.get('psm', 3))
-    lang_code = LANGUAGE_MAP.get(language, 'eng')
-    file = request.files['image']
-    image_bytes = file.read()
-    filename = file.filename
-
-    try:
-        processed_bytes = preprocess_image(image_bytes, preprocessing)
-        text = run_ocr(processed_bytes, lang_code, psm)
-        confidence = get_ocr_confidence(processed_bytes, lang_code)
-        words = [w for w in text.split() if w.strip()]
-        lines = [l for l in text.split('\n') if l.strip()]
-        elapsed = round(time.time() - start_time, 2)
-
-        return jsonify({
-            'success': True,
-            'text': text,
-            'confidence': confidence,
-            'word_count': len(words),
-            'line_count': len(lines),
-            'char_count': len(text),
-            'language': language,
-            'preprocessing': preprocessing,
-            'processing_time': elapsed,
-            'filename': filename
-        })
-    except Exception as e:
-        return jsonify({'error': str(e), 'success': False}), 500
-
-
-@app.route('/api/ocr/bulk', methods=['POST', 'OPTIONS'])
-def process_bulk_images():
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
-
-    start_time = time.time()
-    if 'images' not in request.files:
-        return jsonify({'error': 'No images provided'}), 400
-
-    files = request.files.getlist('images')
-    language = request.form.get('language', 'english')
-    preprocessing = request.form.get('preprocessing', 'standard')
-    export_format = request.form.get('export_format', 'json')
-    lang_code = LANGUAGE_MAP.get(language, 'eng')
-    results = []
-
-    for file in files:
-        file_start = time.time()
-        try:
-            image_bytes = file.read()
-            processed_bytes = preprocess_image(image_bytes, preprocessing)
-            text = run_ocr(processed_bytes, lang_code)
-            confidence = get_ocr_confidence(processed_bytes, lang_code)
-            words = [w for w in text.split() if w.strip()]
-            results.append({
-                'filename': file.filename, 'text': text, 'confidence': confidence,
-                'word_count': len(words), 'char_count': len(text),
-                'processing_time': round(time.time() - file_start, 2), 'status': 'success'
-            })
-        except Exception as e:
-            results.append({
-                'filename': file.filename, 'text': '', 'error': str(e),
-                'status': 'error', 'processing_time': round(time.time() - file_start, 2)
-            })
-
-    total_time = round(time.time() - start_time, 2)
-    success_count = sum(1 for r in results if r['status'] == 'success')
-    avg_confidence = round(sum(r.get('confidence', 0) for r in results if r['status'] == 'success') / success_count, 2) if success_count > 0 else 0
-
-    export_path = None
-    if export_format == 'excel':
-        export_path = export_to_excel(results)
-    elif export_format == 'txt':
-        export_path = export_to_txt(results)
-
-    response_data = {
-        'success': True, 'total_images': len(files), 'successful': success_count,
-        'failed': len(files) - success_count, 'average_confidence': avg_confidence,
-        'total_processing_time': total_time, 'results': results
+  const handleOCR = async () => {
+    if (!file) return toast.error('Please upload an image first!');
+    setLoading(true);
+    const fd = new FormData();
+    fd.append('image', file);
+    fd.append('language', language);
+    fd.append('preprocessing', preprocessing);
+    fd.append('psm', psm);
+    try {
+      const { data } = await axios.post(`${API}/api/ocr`, fd);
+      setResult(data);
+      toast.success('OCR completed successfully!');
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'OCR failed. Is the backend running?');
+    } finally {
+      setLoading(false);
     }
-    if export_path:
-        response_data['export_file'] = os.path.basename(export_path)
-    return jsonify(response_data)
+  };
 
+  const copyText = () => {
+    navigator.clipboard.writeText(result.text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+    toast.success('Copied to clipboard!');
+  };
 
-def export_to_excel(results):
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filepath = os.path.join(OUTPUT_FOLDER, f'ocr_results_{timestamp}.xlsx')
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "OCR Results"
-    headers = ['#', 'Filename', 'Extracted Text', 'Confidence (%)', 'Words', 'Characters', 'Time (s)', 'Status']
-    header_fill = PatternFill(start_color='1a1a2e', end_color='1a1a2e', fill_type='solid')
-    header_font = Font(color='FFFFFF', bold=True)
-    for col, header in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col, value=header)
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = Alignment(horizontal='center')
-    for i, result in enumerate(results, 2):
-        ws.cell(row=i, column=1, value=i-1)
-        ws.cell(row=i, column=2, value=result.get('filename', ''))
-        ws.cell(row=i, column=3, value=result.get('text', ''))
-        ws.cell(row=i, column=4, value=result.get('confidence', 0))
-        ws.cell(row=i, column=5, value=result.get('word_count', 0))
-        ws.cell(row=i, column=6, value=result.get('char_count', 0))
-        ws.cell(row=i, column=7, value=result.get('processing_time', 0))
-        ws.cell(row=i, column=8, value=result.get('status', ''))
-    ws.column_dimensions['B'].width = 30
-    ws.column_dimensions['C'].width = 50
-    wb.save(filepath)
-    return filepath
+  const downloadTxt = () => {
+    const blob = new Blob([result.text], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `ocr_${file.name}_result.txt`;
+    a.click();
+  };
 
+  return (
+    <div className="tab-content">
+      <div className="two-col">
+        {/* LEFT */}
+        <div className="col">
+          <div className="section-title">📷 Upload Image</div>
+          <FileDropzone onFiles={handleFiles} label="Drop image here or click to browse" />
 
-def export_to_txt(results):
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filepath = os.path.join(OUTPUT_FOLDER, f'ocr_results_{timestamp}.txt')
-    with open(filepath, 'w', encoding='utf-8') as f:
-        f.write(f"Multilingual OCR Results - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write("=" * 60 + "\n\n")
-        for i, result in enumerate(results, 1):
-            f.write(f"[{i}] File: {result.get('filename', 'Unknown')}\n")
-            f.write(f"Status: {result.get('status', 'unknown')}\n")
-            f.write(f"Confidence: {result.get('confidence', 0)}%\n")
-            f.write(f"Words: {result.get('word_count', 0)} | Chars: {result.get('char_count', 0)}\n")
-            f.write(f"Text:\n{result.get('text', '')}\n")
-            f.write("-" * 40 + "\n\n")
-    return filepath
+          {preview && (
+            <div className="image-preview-wrap">
+              <img src={preview} alt="preview" className="image-preview" />
+              <div className="image-name">{file?.name}</div>
+            </div>
+          )}
 
+          <div className="settings-grid">
+            <div className="setting-group">
+              <label>🌐 Language</label>
+              <select value={language} onChange={e => setLanguage(e.target.value)}>
+                {LANGUAGES.map(l => <option key={l.value} value={l.value}>{l.label}</option>)}
+              </select>
+            </div>
 
-@app.route('/api/download/<filename>', methods=['GET'])
-def download_file(filename):
-    filepath = os.path.join(OUTPUT_FOLDER, filename)
-    if os.path.exists(filepath):
-        return send_file(filepath, as_attachment=True)
-    return jsonify({'error': 'File not found'}), 404
+            <div className="setting-group">
+              <label>🔧 Preprocessing</label>
+              <select value={preprocessing} onChange={e => setPreprocessing(e.target.value)}>
+                {PREPROCESSING.map(p => <option key={p.value} value={p.value}>{p.label} — {p.desc}</option>)}
+              </select>
+            </div>
 
+            <div className="setting-group">
+              <label>📋 Page Segmentation Mode</label>
+              <select value={psm} onChange={e => setPsm(Number(e.target.value))}>
+                {PSM_MODES.map(m => <option key={m.value} value={m.value}>{m.value}: {m.label}</option>)}
+              </select>
+            </div>
+          </div>
 
-@app.route('/api/preprocess/preview', methods=['POST', 'OPTIONS'])
-def preview_preprocessing():
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
-    if 'image' not in request.files:
-        return jsonify({'error': 'No image provided'}), 400
-    file = request.files['image']
-    preprocessing = request.form.get('preprocessing', 'standard')
-    try:
-        image_bytes = file.read()
-        processed_bytes = preprocess_image(image_bytes, preprocessing)
-        b64 = base64.b64encode(processed_bytes).decode('utf-8')
-        return jsonify({'success': True, 'image': f'data:image/png;base64,{b64}'})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+          <button className="btn-primary" onClick={handleOCR} disabled={loading || !file}>
+            {loading ? <><span className="spinner" /> Processing...</> : '⚡ Extract Text'}
+          </button>
+        </div>
 
+        {/* RIGHT */}
+        <div className="col">
+          <div className="section-title">📝 Extracted Text</div>
 
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+          {result ? (
+            <>
+              <div className="stats-row">
+                <StatCard icon="💬" value={result.word_count} label="Words" color="#00f5a0" />
+                <StatCard icon="📄" value={result.line_count} label="Lines" color="#6c63ff" />
+                <StatCard icon="🔤" value={result.char_count} label="Chars" color="#f5a623" />
+                <StatCard icon="⏱️" value={`${result.processing_time}s`} label="Time" color="#f54242" />
+              </div>
+
+              <ConfidenceMeter value={Math.round(result.confidence)} />
+
+              <div className="text-output-wrap">
+                <div className="text-output-header">
+                  <span>Extracted Text</span>
+                  <div className="text-actions">
+                    <button className="btn-sm" onClick={copyText}>{copied ? '✅' : '📋'} Copy</button>
+                    <button className="btn-sm" onClick={downloadTxt}>💾 Save TXT</button>
+                  </div>
+                </div>
+                <div className="text-output">
+                  {result.text || <em className="no-text">No text extracted. Try different settings.</em>}
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="empty-result">
+              <div className="empty-icon">🔍</div>
+              <p>Upload an image and click Extract Text</p>
+              <p className="empty-sub">Supports 10+ Indian and global languages</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── BULK PROCESSING TAB ─────────────────────────────────────────
+function BulkTab() {
+  const [files, setFiles] = useState([]);
+  const [language, setLanguage] = useState('english');
+  const [preprocessing, setPreprocessing] = useState('standard');
+  const [exportFormat, setExportFormat] = useState('excel');
+  const [results, setResults] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState(0);
+
+  const handleFiles = (f) => {
+    setFiles(f);
+    setResults(null);
+    setProgress(0);
+  };
+
+  const handleBulkOCR = async () => {
+    if (!files.length) return toast.error('Please upload images!');
+    setLoading(true);
+    setProgress(0);
+
+    const fd = new FormData();
+    files.forEach(f => fd.append('images', f));
+    fd.append('language', language);
+    fd.append('preprocessing', preprocessing);
+    fd.append('export_format', exportFormat);
+
+    // Simulate progress
+    const interval = setInterval(() => {
+      setProgress(p => Math.min(p + Math.random() * 15, 90));
+    }, 500);
+
+    try {
+      const { data } = await axios.post(`${API}/api/ocr/bulk`, fd, { timeout: 300000 });
+      clearInterval(interval);
+      setProgress(100);
+      setResults(data);
+      toast.success(`Processed ${data.successful}/${data.total_images} images!`);
+    } catch (e) {
+      clearInterval(interval);
+      toast.error(e.response?.data?.error || 'Bulk OCR failed!');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const downloadExport = async () => {
+    if (!results?.export_file) return;
+    window.open(`${API}/api/download/${results.export_file}`, '_blank');
+  };
+
+  return (
+    <div className="tab-content">
+      <div className="two-col">
+        <div className="col">
+          <div className="section-title">📦 Upload Images (Bulk)</div>
+          <FileDropzone onFiles={handleFiles} multiple label={`Drop multiple images here (${files.length} selected)`} />
+
+          {files.length > 0 && (
+            <div className="file-list">
+              <div className="file-list-header">📁 {files.length} file(s) selected</div>
+              <div className="file-scroll">
+                {files.slice(0, 20).map((f, i) => (
+                  <div key={i} className="file-item">
+                    <span className="file-idx">{i + 1}</span>
+                    <span className="file-nm">{f.name}</span>
+                    <span className="file-sz">{(f.size / 1024).toFixed(1)} KB</span>
+                  </div>
+                ))}
+                {files.length > 20 && <div className="file-more">+{files.length - 20} more files...</div>}
+              </div>
+            </div>
+          )}
+
+          <div className="settings-grid">
+            <div className="setting-group">
+              <label>🌐 Language</label>
+              <select value={language} onChange={e => setLanguage(e.target.value)}>
+                {LANGUAGES.map(l => <option key={l.value} value={l.value}>{l.label}</option>)}
+              </select>
+            </div>
+            <div className="setting-group">
+              <label>🔧 Preprocessing</label>
+              <select value={preprocessing} onChange={e => setPreprocessing(e.target.value)}>
+                {PREPROCESSING.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+              </select>
+            </div>
+            <div className="setting-group">
+              <label>📤 Export Format</label>
+              <select value={exportFormat} onChange={e => setExportFormat(e.target.value)}>
+                <option value="excel">Excel (.xlsx)</option>
+                <option value="txt">Text File (.txt)</option>
+                <option value="json">JSON Only</option>
+              </select>
+            </div>
+          </div>
+
+          {loading && (
+            <div className="progress-wrap">
+              <div className="progress-label">Processing... {Math.round(progress)}%</div>
+              <div className="progress-bar-bg">
+                <div className="progress-bar-fill" style={{ width: `${progress}%` }} />
+              </div>
+            </div>
+          )}
+
+          <button className="btn-primary" onClick={handleBulkOCR} disabled={loading || !files.length}>
+            {loading ? <><span className="spinner" /> Processing {files.length} images...</> : `⚡ Process ${files.length || ''} Images`}
+          </button>
+        </div>
+
+        <div className="col">
+          <div className="section-title">📊 Bulk Results</div>
+          {results ? (
+            <>
+              <div className="stats-row">
+                <StatCard icon="🖼️" value={results.total_images} label="Total" color="#6c63ff" />
+                <StatCard icon="✅" value={results.successful} label="Success" color="#00f5a0" />
+                <StatCard icon="❌" value={results.failed} label="Failed" color="#f54242" />
+                <StatCard icon="📈" value={`${results.average_confidence}%`} label="Avg Conf" color="#f5a623" />
+              </div>
+              <div className="stats-row" style={{ marginTop: 8 }}>
+                <StatCard icon="⏱️" value={`${results.total_processing_time}s`} label="Total Time" color="#00d4ff" />
+              </div>
+
+              {results.export_file && (
+                <button className="btn-secondary" onClick={downloadExport}>
+                  📥 Download {exportFormat === 'excel' ? 'Excel' : 'TXT'} Report
+                </button>
+              )}
+
+              <div className="bulk-results-list">
+                <div className="bulk-results-header">Per-File Results</div>
+                {results.results.map((r, i) => (
+                  <div key={i} className={`bulk-result-item ${r.status}`}>
+                    <div className="bri-top">
+                      <span className="bri-name">{r.filename}</span>
+                      <span className={`bri-badge ${r.status}`}>{r.status === 'success' ? `✅ ${r.confidence}%` : '❌ Error'}</span>
+                    </div>
+                    {r.text && (
+                      <div className="bri-text">{r.text.slice(0, 150)}{r.text.length > 150 ? '...' : ''}</div>
+                    )}
+                    {r.error && <div className="bri-error">{r.error}</div>}
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <div className="empty-result">
+              <div className="empty-icon">📦</div>
+              <p>Upload multiple images for bulk processing</p>
+              <p className="empty-sub">Handles thousands of images automatically</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── ABOUT TAB ─────────────────────────────────────────
+function AboutTab() {
+  return (
+    <div className="tab-content about-tab">
+      <div className="about-hero">
+        <div className="about-logo">🔤</div>
+        <h2>Multilingual OCR System</h2>
+        <p>A complete offline OCR solution for Indian and global languages</p>
+      </div>
+
+      <div className="about-grid">
+        <div className="about-card">
+          <div className="ac-icon">🎯</div>
+          <h3>Objectives</h3>
+          <ul>
+            <li>Extract text from scanned/printed images</li>
+            <li>Support 10+ Indian languages</li>
+            <li>Advanced image preprocessing pipeline</li>
+            <li>Bulk processing for large datasets</li>
+            <li>Export to Excel, TXT, JSON</li>
+            <li>100% offline — no data sent to cloud</li>
+          </ul>
+        </div>
+
+        <div className="about-card">
+          <div className="ac-icon">🔧</div>
+          <h3>Technology Stack</h3>
+          <ul>
+            <li>🐍 Python + Flask (Backend)</li>
+            <li>⚛️ React.js (Frontend)</li>
+            <li>🔤 Tesseract OCR v5 (Engine)</li>
+            <li>👁️ OpenCV (Preprocessing)</li>
+            <li>🖼️ Pillow (Image handling)</li>
+            <li>📊 OpenPyXL (Excel export)</li>
+          </ul>
+        </div>
+
+        <div className="about-card">
+          <div className="ac-icon">🌐</div>
+          <h3>Supported Languages</h3>
+          <ul>
+            <li>🇬🇧 English</li>
+            <li>🇮🇳 Hindi, Marathi</li>
+            <li>🏛️ Kannada, Telugu, Tamil</li>
+            <li>🌊 Malayalam, Bengali</li>
+            <li>🦁 Gujarati, Punjabi</li>
+            <li>🔀 Mixed language support</li>
+          </ul>
+        </div>
+
+        <div className="about-card">
+          <div className="ac-icon">🚀</div>
+          <h3>Future Scope</h3>
+          <ul>
+            <li>AI/Deep Learning based OCR</li>
+            <li>Real-time camera OCR</li>
+            <li>Auto language detection</li>
+            <li>Handwriting recognition</li>
+            <li>Translation integration</li>
+            <li>Document layout understanding</li>
+          </ul>
+        </div>
+      </div>
+
+      <div className="research-gap">
+        <h3>🔍 Research Gap Addressed</h3>
+        <div className="gap-grid">
+          {[
+            ['Mixed Language Support', 'Handles English + Kannada + Hindi in one image'],
+            ['Offline Processing', 'No internet required — full privacy'],
+            ['Bulk Processing', 'Process thousands of images automatically'],
+            ['Custom Preprocessing', '4 levels: minimal to aggressive enhancement'],
+            ['Confidence Scoring', 'Per-image OCR confidence metrics'],
+            ['Export Options', 'Excel, TXT, JSON output formats'],
+          ].map(([title, desc]) => (
+            <div key={title} className="gap-item">
+              <span className="gap-check">✅</span>
+              <div>
+                <strong>{title}</strong>
+                <p>{desc}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── MAIN APP ─────────────────────────────────────────
+export default function App() {
+  const [tab, setTab] = useState('single');
+
+  return (
+    <div className="app">
+      <Toaster position="top-right" toastOptions={{ style: { background: '#1a1a2e', color: '#fff', border: '1px solid #6c63ff' } }} />
+
+      {/* Header */}
+      <header className="header">
+        <div className="header-inner">
+          <div className="logo">
+            <span className="logo-icon">🔤</span>
+            <div>
+              <div className="logo-title">MultiLingua OCR</div>
+              <div className="logo-sub">Intelligent Text Extraction System</div>
+            </div>
+          </div>
+          <div className="header-badges">
+            <span className="badge">🔒 Offline</span>
+            <span className="badge">⚡ Fast</span>
+            <span className="badge">🌐 10+ Languages</span>
+          </div>
+        </div>
+      </header>
+
+      {/* Tabs */}
+      <nav className="tabs">
+        {[
+          { id: 'single', label: '🖼️ Single Image' },
+          { id: 'bulk', label: '📦 Bulk Processing' },
+          { id: 'about', label: 'ℹ️ About' },
+        ].map(t => (
+          <button key={t.id} className={`tab-btn ${tab === t.id ? 'active' : ''}`} onClick={() => setTab(t.id)}>
+            {t.label}
+          </button>
+        ))}
+      </nav>
+
+      {/* Main */}
+      <main className="main">
+        {tab === 'single' && <SingleImageTab />}
+        {tab === 'bulk' && <BulkTab />}
+        {tab === 'about' && <AboutTab />}
+      </main>
+
+      <footer className="footer">
+        <p>Multilingual OCR System • Major Project • Powered by Tesseract OCR + OpenCV + React</p>
+      </footer>
+    </div>
+  );
+}
